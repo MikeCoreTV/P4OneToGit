@@ -1,0 +1,136 @@
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+# ---------- UI Setup ----------
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "P4 One → Git (Smart Snapshot Converter)"
+$form.Size = New-Object System.Drawing.Size(550,180)
+$form.StartPosition = "CenterScreen"
+
+# Label
+$label = New-Object System.Windows.Forms.Label
+$label.Text = "P4 One Project Folder:"
+$label.Location = New-Object System.Drawing.Point(10,20)
+$label.AutoSize = $true
+$form.Controls.Add($label)
+
+# Textbox
+$textBox = New-Object System.Windows.Forms.TextBox
+$textBox.Location = New-Object System.Drawing.Point(10,45)
+$textBox.Size = New-Object System.Drawing.Size(400,22)
+$form.Controls.Add($textBox)
+
+# Browse button
+$browseButton = New-Object System.Windows.Forms.Button
+$browseButton.Text = "Browse…"
+$browseButton.Location = New-Object System.Drawing.Point(420,43)
+$browseButton.Add_Click({
+    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+    if ($dialog.ShowDialog() -eq "OK") { $textBox.Text = $dialog.SelectedPath }
+})
+$form.Controls.Add($browseButton)
+
+# ---------- Convert Button ----------
+$convertButton = New-Object System.Windows.Forms.Button
+$convertButton.Text = "Convert"
+$convertButton.Location = New-Object System.Drawing.Point(350,85)
+$convertButton.Add_Click({
+
+    $source = $textBox.Text.Trim()
+    if (-not (Test-Path $source)) {
+        [System.Windows.Forms.MessageBox]::Show("Invalid folder path.","Error")
+        return
+    }
+
+    # Determine target folder
+    $parent = Split-Path $source -Parent
+    $name = Split-Path $source -Leaf
+    $target = Join-Path $parent ($name + "_Git")
+
+    # ---------- Read .p4ignore ----------
+    $p4ignorePaths = @()
+    $p4ignoreFile = Join-Path $source ".p4ignore"
+    if (Test-Path $p4ignoreFile) {
+        $p4ignorePaths = Get-Content $p4ignoreFile |
+            Where-Object { $_ -and -not $_.StartsWith("#") } |
+            ForEach-Object {
+                $_.TrimStart("/").TrimEnd("/") # Normalize
+            }
+    }
+
+    # Always exclude Perforce internals
+    $ignoreList = @(".p4one",".p4root",".p4config",".p4settings",".p4ignore") + $p4ignorePaths
+
+    # ---------- Copy Files with Ignore ----------
+    # Overwrite target if it exists
+    if (Test-Path $target) {
+        Write-Host "Overwriting existing Git folder..."
+        # Remove everything except .git to preserve history
+        Get-ChildItem $target -Force | Where-Object { $_.Name -ne ".git" } | Remove-Item -Recurse -Force
+    } else {
+        New-Item -ItemType Directory -Path $target | Out-Null
+    }
+
+    # Function to copy recursively while ignoring paths
+    function Copy-WithIgnore {
+        param($src, $dst, $ignore)
+
+        Get-ChildItem $src -Force | ForEach-Object {
+            $relPath = $_.FullName.Substring($src.Length).TrimStart("\","/")
+            $skip = $false
+
+            foreach ($pattern in $ignore) {
+                if ($relPath -like "*$pattern*") { $skip = $true; break }
+            }
+
+            if ($skip) { return }
+
+            $destPath = Join-Path $dst $_.Name
+            if ($_.PSIsContainer) {
+                New-Item -ItemType Directory -Path $destPath -Force | Out-Null
+                Copy-WithIgnore $_.FullName $destPath $ignore
+            } else {
+                Copy-Item $_.FullName $destPath -Force
+            }
+        }
+    }
+
+    Copy-WithIgnore $source $target $ignoreList
+
+    Set-Location $target
+
+    # ---------- Git Setup ----------
+    # Convert .p4ignore → .gitignore
+    if (Test-Path ".p4ignore") { Remove-Item ".p4ignore" -Force }
+
+    # Ensure Perforce internals are ignored
+    Add-Content ".gitignore" ($ignoreList -join "`n")
+
+    # Make all files writable
+    attrib -R * /S
+
+    # Init git if not already
+    if (-not (Test-Path ".git")) {
+        git init | Out-Null
+        git branch -m main
+    }
+
+    # Stage all changes and commit (update if repo already exists)
+    git add . 
+
+    [System.Windows.Forms.MessageBox]::Show(
+        "Conversion complete.`nGit repo at:`n$target",
+        "Done"
+    )
+    $form.Close()
+})
+$form.Controls.Add($convertButton)
+
+# Cancel button
+$cancelButton = New-Object System.Windows.Forms.Button
+$cancelButton.Text = "Cancel"
+$cancelButton.Location = New-Object System.Drawing.Point(450,85)
+$cancelButton.Add_Click({ $form.Close() })
+$form.Controls.Add($cancelButton)
+
+$form.ShowDialog()
